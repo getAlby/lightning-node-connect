@@ -9,6 +9,7 @@ require (
 	github.com/lightninglabs/pool v0.5.1-alpha.0.20210805073735-09c8937f2284
 	github.com/lightninglabs/pool/auctioneerrpc v1.0.3 // indirect
 	github.com/lightningnetwork/lnd v0.13.0-beta.rc5.0.20210812073038-5499a35987b7
+	github.com/teamortix/golang-wasm/wasm v0.0.0-20210704024101-285babe68092
 	google.golang.org/grpc v1.39.0
 )
 

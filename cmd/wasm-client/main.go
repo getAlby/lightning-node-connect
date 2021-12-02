@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"os"
 	"runtime/debug"
-	"syscall/js"
+
+	// "runtime/debug"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/lightninglabs/loop/looprpc"
@@ -25,6 +27,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc/watchtowerrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/wtclientrpc"
 	"github.com/lightningnetwork/lnd/signal"
+	"github.com/teamortix/golang-wasm/wasm"
 	"google.golang.org/grpc"
 )
 
@@ -63,16 +66,14 @@ func main() {
 		}
 	}()
 
-	// Setup JS callbacks.
-	js.Global().Set("wasmClientIsReady", js.FuncOf(wasmClientIsReady))
-	js.Global().Set(
-		"wasmClientConnectServer", js.FuncOf(wasmClientConnectServer),
-	)
-	js.Global().Set(
-		"wasmClientIsConnected", js.FuncOf(wasmClientIsConnected),
-	)
-	js.Global().Set("wasmClientDisconnect", js.FuncOf(wasmClientDisconnect))
-	js.Global().Set("wasmClientInvokeRPC", js.FuncOf(wasmClientInvokeRPC))
+	wasm.Expose("isReady", wasmClientIsReady)
+	wasm.Expose("connectServer", wasmClientConnectServer)
+	wasm.Expose("isConnected", wasmClientIsConnected)
+	wasm.Expose("disconnect", wasmClientDisconnect)
+	wasm.Expose("invokeRPC", wasmClientInvokeRPC)
+
+	wasm.Ready()
+
 	for _, registration := range registrations {
 		registration(registry)
 	}
@@ -88,8 +89,8 @@ func main() {
 	if err != nil {
 		exit(err)
 	}
-
-	// Hook interceptor for os signals.
+	//
+	// 	// Hook interceptor for os signals.
 	shutdownInterceptor, err := signal.Intercept()
 	if err != nil {
 		exit(err)
@@ -108,28 +109,20 @@ func main() {
 	select {
 	case <-shutdownInterceptor.ShutdownChannel():
 		log.Debugf("Shutting down WASM client")
-		_ = wasmClientDisconnect(js.ValueOf(nil), nil)
+		wasmClientDisconnect()
 		log.Debugf("Shutdown of WASM client complete")
 	}
+	<-make(chan bool) // To use anything from Go WASM, the program may not exit.
 }
 
-func wasmClientIsReady(_ js.Value, _ []js.Value) interface{} {
+func wasmClientIsReady() bool {
 	// This will always return true. So as soon as this method is called
 	// successfully the JS part knows the WASM instance is fully started up
 	// and ready to connect.
-	return js.ValueOf(true)
+	return true
 }
 
-func wasmClientConnectServer(_ js.Value, args []js.Value) interface{} {
-	if len(args) != 3 {
-		return js.ValueOf("invalid use of wasmClientConnectServer, " +
-			"need 3 parameters: server, isDevServer, pairingPhrase")
-	}
-
-	mailboxServer := args[0].String()
-	isDevServer := args[1].Bool()
-	pairingPhrase := args[2].String()
-
+func wasmClientConnectServer(mailboxServer string, isDevServer bool, pairingPhrase string) {
 	// Disable TLS verification for the REST connections if this is a dev
 	// server.
 	if isDevServer {
@@ -144,53 +137,43 @@ func wasmClientConnectServer(_ js.Value, args []js.Value) interface{} {
 	if err != nil {
 		exit(err)
 	}
-
-	log.Debugf("WASM client connected to RPC")
-
-	return nil
 }
 
-func wasmClientIsConnected(_ js.Value, _ []js.Value) interface{} {
-	return js.ValueOf(lndConn != nil)
+func wasmClientIsConnected() bool {
+	return lndConn != nil
 }
 
-func wasmClientDisconnect(_ js.Value, _ []js.Value) interface{} {
+func wasmClientDisconnect() {
 	if lndConn != nil {
 		if err := lndConn.Close(); err != nil {
 			log.Errorf("Error closing RPC connection: %v", err)
 		}
 	}
-
-	return nil
 }
 
-func wasmClientInvokeRPC(_ js.Value, args []js.Value) interface{} {
-	if len(args) != 3 {
-		return js.ValueOf("invalid use of wasmClientInvokeRPC, " +
-			"need 3 parameters: rpcName, request, callback")
-	}
-
+func wasmClientInvokeRPC(rpcName string, requestJSON string, jsCallback func(resultJSON string, err error)) interface{} {
 	if lndConn == nil {
-		return js.ValueOf("RPC connection not ready")
+		return wasm.NewPromise(func() (interface{}, error) {
+			return nil, errors.New("RPC connection not ready")
+		})
 	}
-
-	rpcName := args[0].String()
-	requestJSON := args[1].String()
-	jsCallback := args[len(args)-1:][0]
 
 	method, ok := registry[rpcName]
 	if !ok {
-		return js.ValueOf("rpc with name " + rpcName + " not found")
+		return wasm.NewPromise(func() (interface{}, error) {
+			return nil, errors.New("rpc with name " + rpcName + " not found")
+		})
 	}
 
 	go func() {
-		log.Infof("Calling '%s' on RPC with request %s",
-			rpcName, requestJSON)
+		log.Infof("Calling '%s' on RPC with request %s", rpcName, requestJSON)
 		cb := func(resultJSON string, err error) {
 			if err != nil {
-				jsCallback.Invoke(js.ValueOf(err.Error()))
+				jsCallback("", err)
+				//jsCallback.Invoke(js.ValueOf(err.Error()))
 			} else {
-				jsCallback.Invoke(js.ValueOf(resultJSON))
+				jsCallback(resultJSON, nil)
+				//jsCallback.Invoke(js.ValueOf(resultJSON))
 			}
 		}
 		ctx := context.Background()
